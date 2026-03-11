@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-notion-sync",
+  "name": "Notion Sync",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "Synchronize your Obsidian vault with Notion — preserves folder hierarchy, markdown formatting, internal links, metadata, and attachments.",
+  "author": "Obsidian Notion Sync",
+  "isDesktopOnly": true
+}
