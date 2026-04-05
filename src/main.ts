@@ -4,18 +4,21 @@ import { SyncEngine } from "./syncEngine";
 import { StateManager } from "./stateManager";
 import { NotionSyncSettingTab } from "./ui/settingsTab";
 import { SyncLogModal } from "./ui/syncLogModal";
+import { HistoryModal } from "./ui/historyModal";
 import { SyncPanelView, SYNC_PANEL_VIEW_TYPE } from "./ui/syncPanelView";
 import {
   SyncMode,
   DEFAULT_SETTINGS,
   DEFAULT_SYNC_STATE,
+  DEFAULT_SYNC_HISTORY,
 } from "./types";
-import type { PluginSettings, SyncState } from "./types";
+import type { PluginSettings, SyncState, SyncHistory } from "./types";
 
 /** Persisted data shape in data.json */
 interface PersistedData {
   settings: PluginSettings;
   syncState: SyncState;
+  syncHistory?: SyncHistory;
 }
 
 export default class NotionSyncPlugin extends Plugin {
@@ -26,6 +29,12 @@ export default class NotionSyncPlugin extends Plugin {
   private saveDebounce: number | null = null;
   private onSaveEventRef: ReturnType<typeof this.app.vault.on> | null = null;
 
+  // ── Status Bar ─────────────────────────────────────────────
+  private statusBarEl!: HTMLElement;
+
+  // ── File Explorer Indicators ───────────────────────────────
+  private dirtyFiles = new Set<string>();
+
   async onload(): Promise<void> {
     await this.loadState();
 
@@ -34,6 +43,9 @@ export default class NotionSyncPlugin extends Plugin {
       this.settings,
       this.stateManager
     );
+
+    // Status bar
+    this.statusBarEl = this.addStatusBarItem();
 
     // Settings tab
     this.addSettingTab(new NotionSyncSettingTab(this.app, this));
@@ -103,14 +115,36 @@ export default class NotionSyncPlugin extends Plugin {
       callback: () => this.pullAllPublic(),
     });
 
+    this.addCommand({
+      id: "pull-new-pages",
+      name: "Pull new pages from Notion",
+      callback: () => this.pullNewPagesPublic(),
+    });
+
     // Configure auto-sync based on mode
     this.configureSyncMode();
+
+    // Track dirty (locally modified) files for explorer indicators
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (file instanceof TFile && file.extension === "md") {
+          this.dirtyFiles.add(file.path);
+          this.refreshExplorerDecorations();
+        }
+      })
+    );
 
     // Listen for file renames to update mappings
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         this.stateManager.renamePath(oldPath, file.path);
+        // Update dirtyFiles set
+        if (this.dirtyFiles.has(oldPath)) {
+          this.dirtyFiles.delete(oldPath);
+          this.dirtyFiles.add(file.path);
+        }
         this.debounceSaveState();
+        this.refreshExplorerDecorations();
       })
     );
 
@@ -118,14 +152,98 @@ export default class NotionSyncPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         this.stateManager.removeFileMapping(file.path);
+        this.dirtyFiles.delete(file.path);
         this.debounceSaveState();
+        this.refreshExplorerDecorations();
       })
     );
+
+    // Refresh explorer decorations once layout is ready
+    this.app.workspace.onLayoutReady(() => this.refreshExplorerDecorations());
+
+    // Initial status bar state
+    this.updateStatusBar("idle");
   }
 
   onunload(): void {
     this.clearScheduledSync();
     this.syncEngine?.destroy();
+  }
+
+  // ── Status Bar ─────────────────────────────────────────────
+
+  updateStatusBar(state: "idle" | "syncing" | "error", detail?: string): void {
+    if (!this.statusBarEl) return;
+
+    this.statusBarEl.removeClass("notion-sync-status-error");
+
+    switch (state) {
+      case "idle": {
+        const lastSync = this.stateManager.lastFullSync;
+        if (lastSync > 0) {
+          const agoStr = this.formatTimeAgo(lastSync);
+          this.statusBarEl.setText(`☁ Synced ${agoStr}`);
+        } else {
+          this.statusBarEl.setText("☁ Ready");
+        }
+        break;
+      }
+      case "syncing":
+        this.statusBarEl.setText("⟳ Syncing...");
+        break;
+      case "error":
+        this.statusBarEl.setText("⚠ Sync error");
+        this.statusBarEl.addClass("notion-sync-status-error");
+        break;
+    }
+  }
+
+  private formatTimeAgo(timestamp: number): string {
+    const diffMs = Date.now() - timestamp;
+    const diffSecs = Math.floor(diffMs / 1000);
+    const diffMins = Math.floor(diffSecs / 60);
+    const diffHours = Math.floor(diffMins / 60);
+    const diffDays = Math.floor(diffHours / 24);
+
+    if (diffSecs < 60) return "just now";
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays === 1) return "yesterday";
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return new Date(timestamp).toLocaleDateString();
+  }
+
+  // ── File Explorer Indicators ───────────────────────────────
+
+  private refreshExplorerDecorations(): void {
+    const allMappings = this.stateManager.getAllFileMappings();
+
+    document.querySelectorAll<HTMLElement>(".nav-file-title").forEach((el) => {
+      const path = el.getAttribute("data-path");
+      if (!path) return;
+
+      const isSynced = path in allMappings;
+      const isDirty = this.dirtyFiles.has(path);
+
+      el.removeClass("notion-sync-synced");
+      el.removeClass("notion-sync-modified");
+
+      if (isSynced && isDirty) {
+        el.addClass("notion-sync-modified");
+      } else if (isSynced && !isDirty) {
+        el.addClass("notion-sync-synced");
+      }
+    });
+  }
+
+  // ── Get Active Sync Panel ──────────────────────────────────
+
+  getActiveSyncPanel(): SyncPanelView | null {
+    const leaves = this.app.workspace.getLeavesOfType(SYNC_PANEL_VIEW_TYPE);
+    if (leaves.length === 0) return null;
+    const view = leaves[0].view;
+    if (view instanceof SyncPanelView) return view;
+    return null;
   }
 
   // ── Public Methods (called by UI) ──────────────────────────
@@ -188,6 +306,7 @@ export default class NotionSyncPlugin extends Plugin {
     const data: PersistedData = {
       settings: this.settings,
       syncState: this.stateManager.getState(),
+      syncHistory: this.stateManager.getHistoryForPersistence(),
     };
     await this.saveData(data);
     this.stateManager.markClean();
@@ -196,36 +315,123 @@ export default class NotionSyncPlugin extends Plugin {
   // ── Public wrappers called by SyncPanelView ────────────────
 
   async syncFullVaultPublic(): Promise<void> {
-    return this.syncFullVault();
+    this.updateStatusBar("syncing");
+    const panel = this.getActiveSyncPanel();
+    panel?.showProgress("Starting...", 0);
+    try {
+      await this.syncFullVault();
+      this.updateStatusBar("idle");
+    } catch (e) {
+      this.updateStatusBar("error");
+      throw e;
+    } finally {
+      panel?.hideProgress();
+    }
   }
 
   async syncIncrementalPublic(): Promise<void> {
-    return this.syncIncremental();
+    this.updateStatusBar("syncing");
+    const panel = this.getActiveSyncPanel();
+    panel?.showProgress("Starting incremental sync...", 0);
+    try {
+      await this.syncIncremental();
+      this.updateStatusBar("idle");
+    } catch (e) {
+      this.updateStatusBar("error");
+      throw e;
+    } finally {
+      panel?.hideProgress();
+    }
   }
 
   async syncCurrentFilePublic(): Promise<void> {
+    this.updateStatusBar("syncing");
     const file = this.app.workspace.getActiveFile();
-    if (file) return this.syncCurrentFile(file);
-    new Notice("No active file");
+    if (!file) {
+      new Notice("No active file");
+      this.updateStatusBar("idle");
+      return;
+    }
+    try {
+      await this.syncCurrentFile(file);
+      this.dirtyFiles.delete(file.path);
+      this.refreshExplorerDecorations();
+      this.updateStatusBar("idle");
+    } catch (e) {
+      this.updateStatusBar("error");
+      throw e;
+    }
   }
 
   async pullCurrentFilePublic(): Promise<void> {
+    this.updateStatusBar("syncing");
     const file = this.app.workspace.getActiveFile();
-    if (!file) { new Notice("No active file"); return; }
-    const result = await this.syncEngine.pullCurrentFile(file);
-    const messages = {
-      pulled:      `Pulled from Notion: ${file.basename}`,
-      no_change:   `No changes in Notion: ${file.basename}`,
-      conflict:    `Conflict: both local and Notion changed. Resolve manually: ${file.basename}`,
-      not_mapped:  `Not synced yet (no Notion mapping): ${file.basename}`,
-    };
-    new Notice(messages[result]);
-    await this.saveState();
+    if (!file) {
+      new Notice("No active file");
+      this.updateStatusBar("idle");
+      return;
+    }
+    try {
+      const result = await this.syncEngine.pullCurrentFile(file);
+      const messages: Record<string, string> = {
+        pulled:     `Pulled from Notion: ${file.basename}`,
+        no_change:  `Already up to date: ${file.basename}`,
+        not_mapped: `Not synced yet — push to Notion first: ${file.basename}`,
+      };
+      new Notice(messages[result] ?? `Done: ${file.basename}`);
+      if (result === "pulled") {
+        this.dirtyFiles.delete(file.path);
+        this.refreshExplorerDecorations();
+      }
+      await this.saveState();
+      this.updateStatusBar("idle");
+    } catch (e) {
+      this.updateStatusBar("error");
+      throw e;
+    }
   }
 
   async pullAllPublic(): Promise<void> {
-    await this.syncEngine.pullAll();
-    await this.saveState();
+    this.updateStatusBar("syncing");
+    const panel = this.getActiveSyncPanel();
+    panel?.showProgress("Starting pull...", 0);
+    this.syncEngine.setProgressCallback((text, pct) => panel?.showProgress(text, pct));
+    try {
+      await this.syncEngine.pullAll();
+      // Clear dirty flags for all synced files
+      const allMappings = this.stateManager.getAllFileMappings();
+      for (const p of Object.keys(allMappings)) {
+        this.dirtyFiles.delete(p);
+      }
+      this.refreshExplorerDecorations();
+      await this.saveState();
+      this.updateStatusBar("idle");
+    } catch (e) {
+      this.updateStatusBar("error");
+      throw e;
+    } finally {
+      this.syncEngine.setProgressCallback(null);
+      panel?.hideProgress();
+    }
+  }
+
+  async pullNewPagesPublic(): Promise<void> {
+    this.updateStatusBar("syncing");
+    const panel = this.getActiveSyncPanel();
+    panel?.showProgress("Starting pull new pages...", 0);
+    this.syncEngine.setProgressCallback((text, pct) => panel?.showProgress(text, pct));
+    try {
+      await this.syncEngine.pullNewPages();
+      this.refreshExplorerDecorations();
+      await this.saveState();
+      this.updateStatusBar("idle");
+    } catch (e) {
+      this.updateStatusBar("error");
+      throw e;
+    } finally {
+      this.syncEngine.setProgressCallback(null);
+      panel?.hideProgress();
+    }
   }
 
   openSyncLogPublic(): void {
@@ -247,6 +453,27 @@ export default class NotionSyncPlugin extends Plugin {
     }
   }
 
+  // ── History & Rollback ─────────────────────────────────────
+
+  async rollbackFile(historyId: string): Promise<void> {
+    const entry = this.stateManager.getHistoryEntry(historyId);
+    if (!entry?.snapshot) {
+      new Notice("No snapshot available");
+      return;
+    }
+    const file = this.app.vault.getAbstractFileByPath(entry.filePath);
+    if (!(file instanceof TFile)) {
+      new Notice("File not found");
+      return;
+    }
+    await this.app.vault.modify(file, entry.snapshot);
+    new Notice(`Rolled back: ${entry.fileName}`);
+  }
+
+  openHistoryModal(): void {
+    new HistoryModal(this.app, this).open();
+  }
+
   // ── Private ────────────────────────────────────────────────
 
   private async loadState(): Promise<void> {
@@ -257,22 +484,72 @@ export default class NotionSyncPlugin extends Plugin {
         ...DEFAULT_SYNC_STATE,
         ...data.syncState,
       });
+      if (data.syncHistory) {
+        this.stateManager.setHistory({
+          entries: data.syncHistory.entries || [],
+        });
+      }
     }
   }
 
   private async syncFullVault(): Promise<void> {
-    const result = await this.syncEngine.syncFullVault();
-    await this.saveState();
+    this.updateStatusBar("syncing");
+    const panel = this.getActiveSyncPanel();
+    panel?.showProgress("Starting full sync...", 0);
+    this.syncEngine.setProgressCallback((text, pct) => panel?.showProgress(text, pct));
+    try {
+      await this.syncEngine.syncFullVault();
+      // Clear dirty flags for all mapped files
+      const allMappings = this.stateManager.getAllFileMappings();
+      for (const p of Object.keys(allMappings)) {
+        this.dirtyFiles.delete(p);
+      }
+      this.refreshExplorerDecorations();
+      await this.saveState();
+      this.updateStatusBar("idle");
+    } catch (e) {
+      this.updateStatusBar("error");
+      throw e;
+    } finally {
+      this.syncEngine.setProgressCallback(null);
+      panel?.hideProgress();
+    }
   }
 
   private async syncIncremental(): Promise<void> {
-    const result = await this.syncEngine.syncIncremental();
-    await this.saveState();
+    this.updateStatusBar("syncing");
+    const panel = this.getActiveSyncPanel();
+    this.syncEngine.setProgressCallback((text, pct) => panel?.showProgress(text, pct));
+    try {
+      await this.syncEngine.syncIncremental();
+      const allMappings = this.stateManager.getAllFileMappings();
+      for (const p of Object.keys(allMappings)) {
+        this.dirtyFiles.delete(p);
+      }
+      this.refreshExplorerDecorations();
+      await this.saveState();
+      this.updateStatusBar("idle");
+    } catch (e) {
+      this.updateStatusBar("error");
+      throw e;
+    } finally {
+      this.syncEngine.setProgressCallback(null);
+      panel?.hideProgress();
+    }
   }
 
   private async syncCurrentFile(file: TFile): Promise<void> {
-    await this.syncEngine.syncCurrentFile(file);
-    await this.saveState();
+    this.updateStatusBar("syncing");
+    try {
+      await this.syncEngine.syncCurrentFile(file);
+      this.dirtyFiles.delete(file.path);
+      this.refreshExplorerDecorations();
+      await this.saveState();
+      this.updateStatusBar("idle");
+    } catch (e) {
+      this.updateStatusBar("error");
+      throw e;
+    }
   }
 
   private async rebuildHierarchy(): Promise<void> {

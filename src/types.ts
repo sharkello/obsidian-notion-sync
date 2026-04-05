@@ -16,6 +16,8 @@ export interface PluginSettings {
   scheduledIntervalMinutes: number;
   /** Optional external upload URL for attachments */
   attachmentUploadUrl: string;
+  /** Download Notion images to local vault on pull */
+  downloadImages: boolean;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
@@ -26,6 +28,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   syncMetadata: true,
   scheduledIntervalMinutes: 30,
   attachmentUploadUrl: "",
+  downloadImages: true,
 };
 
 /** Mapping entry for a single synced file */
@@ -81,3 +84,20 @@ export interface NotionBlock {
   type: string;
   [key: string]: any;
 }
+
+// ── Sync History ───────────────────────────────────────────
+
+export interface SyncHistoryEntry {
+  id: string;           // unique id (timestamp + random)
+  timestamp: number;
+  operation: "push" | "pull" | "pull-new";
+  filePath: string;
+  fileName: string;
+  snapshot?: string;    // previous file content (for rollback), only for pull
+}
+
+export interface SyncHistory {
+  entries: SyncHistoryEntry[];
+}
+
+export const DEFAULT_SYNC_HISTORY: SyncHistory = { entries: [] };

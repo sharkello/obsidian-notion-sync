@@ -12,6 +12,9 @@ export class SyncPanelView extends ItemView {
   private plugin: NotionSyncPlugin;
   private statusEl: HTMLElement | null = null;
   private refreshInterval: number | null = null;
+  private progressEl: HTMLElement | null = null;
+  private progressFillEl: HTMLElement | null = null;
+  private progressTextEl: HTMLElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: NotionSyncPlugin) {
     super(leaf);
@@ -75,13 +78,28 @@ export class SyncPanelView extends ItemView {
     this.addToolbarBtn(pullGroup, "file-down", "Pull: Current Note ← Notion", () =>
       this.runAction(() => this.plugin.pullCurrentFilePublic())
     );
+    this.addToolbarBtn(pullGroup, "folder-down", "Pull New Pages from Notion", () =>
+      this.runAction(() => this.plugin.pullNewPagesPublic())
+    );
 
     // Divider
     toolbar.createDiv({ cls: "notion-sync-toolbar-divider" });
 
+    this.addToolbarBtn(toolbar, "history", "Sync History", () =>
+      this.plugin.openHistoryModal()
+    );
+
     this.addToolbarBtn(toolbar, "list", "Open Sync Log", () =>
       this.plugin.openSyncLogPublic()
     );
+
+    // ── Progress bar ───────────────────────────────────────────
+    this.progressEl = root.createDiv({ cls: "notion-sync-progress" });
+    this.progressEl.style.display = "none";
+
+    const progressBar = this.progressEl.createDiv({ cls: "notion-sync-progress-bar" });
+    this.progressFillEl = progressBar.createDiv({ cls: "notion-sync-progress-fill" });
+    this.progressTextEl = this.progressEl.createDiv({ cls: "notion-sync-progress-text" });
 
     // ── Mode selector ──────────────────────────────────────────
     const modeSection = root.createDiv({ cls: "notion-sync-section" });
@@ -159,6 +177,22 @@ export class SyncPanelView extends ItemView {
       text: `Mode: ${modeLabel[mode] ?? mode}`,
       cls: "notion-sync-mode-label",
     });
+  }
+
+  /** Show a progress bar with text and percentage */
+  showProgress(text: string, percent: number): void {
+    if (!this.progressEl || !this.progressFillEl || !this.progressTextEl) return;
+    this.progressEl.style.display = "";
+    this.progressFillEl.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+    this.progressTextEl.setText(text);
+  }
+
+  /** Hide the progress bar */
+  hideProgress(): void {
+    if (!this.progressEl) return;
+    this.progressEl.style.display = "none";
+    if (this.progressFillEl) this.progressFillEl.style.width = "0%";
+    if (this.progressTextEl) this.progressTextEl.setText("");
   }
 
   // ── Helpers ────────────────────────────────────────────────

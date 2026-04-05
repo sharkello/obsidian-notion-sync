@@ -236,6 +236,38 @@ export class NotionClient {
     return response.results;
   }
 
+  /**
+   * Get child pages of a page (blocks of type "child_page").
+   * Returns an array of {id, title} for each child page found.
+   */
+  async getChildPages(pageId: string): Promise<Array<{id: string, title: string}>> {
+    const results: Array<{id: string, title: string}> = [];
+    let cursor: string | undefined;
+
+    do {
+      const params = cursor
+        ? `?start_cursor=${cursor}&page_size=100`
+        : "?page_size=100";
+      const response = await this.request(
+        "GET",
+        `/blocks/${pageId}/children${params}`
+      );
+
+      for (const block of response.results) {
+        if (block.type === "child_page") {
+          results.push({
+            id: block.id,
+            title: block.child_page?.title || "Untitled",
+          });
+        }
+      }
+
+      cursor = response.has_more ? response.next_cursor : undefined;
+    } while (cursor);
+
+    return results;
+  }
+
   /** Test connection by retrieving the root page */
   async testConnection(rootPageId: string): Promise<boolean> {
     const page = await this.getPage(rootPageId);

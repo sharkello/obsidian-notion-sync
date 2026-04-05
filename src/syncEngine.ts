@@ -1,11 +1,11 @@
 import type { App, TFile, TFolder, TAbstractFile } from "obsidian";
-import { Notice } from "obsidian";
+import { Notice, requestUrl } from "obsidian";
 import { NotionClient } from "./notionClient";
 import { MarkdownParser } from "./markdownParser";
 import { NotionToMarkdown } from "./notionToMarkdown";
 import { LinkResolver } from "./linkResolver";
 import { AttachmentUploader } from "./attachmentUploader";
-import { StateManager } from "./stateManager";
+import { StateManager, normalizeNotionId } from "./stateManager";
 import type { PluginSettings, NotionBlock } from "./types";
 
 /**
@@ -23,6 +23,17 @@ export class SyncEngine {
   private stateManager: StateManager;
   private isSyncing = false;
   private abortRequested = false;
+
+  // ── Progress callback ──────────────────────────────────────
+  private progressCallback: ((text: string, percent: number) => void) | null = null;
+
+  setProgressCallback(cb: ((text: string, percent: number) => void) | null): void {
+    this.progressCallback = cb;
+  }
+
+  private reportProgress(text: string, percent: number): void {
+    this.progressCallback?.(text, percent);
+  }
 
   constructor(
     app: App,
@@ -104,6 +115,11 @@ export class SyncEngine {
           // Progress notification every 25 files
           if ((i + 1) % 25 === 0) {
             new Notice(`Syncing... ${i + 1}/${total}`);
+          }
+          // Report progress callback every 10 files
+          if ((i + 1) % 10 === 0 || i === mdFiles.length - 1) {
+            const pct = Math.round(((i + 1) / total) * 100);
+            this.reportProgress(`Syncing ${i + 1}/${total}...`, pct);
           }
         } catch (error: any) {
           errors++;
@@ -267,17 +283,16 @@ export class SyncEngine {
   // ── Pull from Notion ───────────────────────────────────────
 
   /**
-   * Pull a single file from Notion back to Obsidian.
-   * Returns the outcome so callers can show appropriate notices.
+   * Pull a single file from Notion → always overwrites the local file.
+   * No conflict detection — Notion is the source of truth when pulling.
    *
-   * 'pulled'      – file updated from Notion
-   * 'no_change'   – Notion has no new edits, nothing to do
-   * 'conflict'    – both sides changed; local file NOT overwritten
-   * 'not_mapped'  – no Notion page mapped for this file
+   * 'pulled'     – file overwritten from Notion
+   * 'no_change'  – Notion hasn't changed since last sync
+   * 'not_mapped' – no Notion page mapped for this file
    */
   async pullCurrentFile(
     file: TFile
-  ): Promise<"pulled" | "no_change" | "conflict" | "not_mapped"> {
+  ): Promise<"pulled" | "no_change" | "not_mapped"> {
     if (!this.validateSettings()) return "not_mapped";
 
     const mapping = this.stateManager.getFileMapping(file.path);
@@ -286,19 +301,26 @@ export class SyncEngine {
     const page = await this.notionClient.getPage(mapping.notionPageId);
     if (!page || page.archived) return "not_mapped";
 
-    const notionEditedMs = new Date(page.last_edited_time).getTime();
-    const hasNotionChanges = notionEditedMs > mapping.lastSyncedAt;
+    // Save snapshot before overwriting
+    const snapshot = await this.app.vault.cachedRead(file);
+    this.stateManager.addHistoryEntry({
+      timestamp: Date.now(),
+      operation: "pull",
+      filePath: file.path,
+      fileName: file.basename,
+      snapshot,
+    });
 
-    if (!hasNotionChanges) return "no_change";
-
-    // Check for local unsaved changes
-    const localContent = await this.app.vault.cachedRead(file);
-    const localHash = this.hashContent(localContent);
-    if (localHash !== mapping.lastSyncedHash) return "conflict";
-
-    // Safe to overwrite — fetch blocks and convert
+    // Always fetch and overwrite — no conflict check
     const blocks = await this.notionClient.getBlocksWithContent(mapping.notionPageId);
-    const markdown = this.n2md.convert(blocks);
+    const rawMarkdown = this.n2md.convert(blocks);
+    // Convert Notion page URLs back to Obsidian [[wiki-links]]
+    let markdown = this.restoreWikiLinks(rawMarkdown);
+
+    // Download images if setting is enabled
+    if (this.settings.downloadImages) {
+      markdown = await this.downloadNotionImages(markdown, file.path);
+    }
 
     await this.app.vault.modify(file, markdown);
 
@@ -314,19 +336,18 @@ export class SyncEngine {
   }
 
   /**
-   * Pull all mapped files from Notion.
-   * Skips files with conflicts (reports count).
+   * Pull all mapped files from Notion — always overwrites local files.
    */
-  async pullAll(): Promise<{ pulled: number; conflicts: number; skipped: number; errors: number }> {
+  async pullAll(): Promise<{ pulled: number; skipped: number; errors: number }> {
     if (this.isSyncing) {
       new Notice("Sync already in progress");
-      return { pulled: 0, conflicts: 0, skipped: 0, errors: 0 };
+      return { pulled: 0, skipped: 0, errors: 0 };
     }
-    if (!this.validateSettings()) return { pulled: 0, conflicts: 0, skipped: 0, errors: 0 };
+    if (!this.validateSettings()) return { pulled: 0, skipped: 0, errors: 0 };
 
     this.isSyncing = true;
     this.abortRequested = false;
-    let pulled = 0, conflicts = 0, skipped = 0, errors = 0;
+    let pulled = 0, skipped = 0, errors = 0;
 
     try {
       this.stateManager.addLog("info", "Starting pull from Notion");
@@ -334,10 +355,12 @@ export class SyncEngine {
 
       const allMappings = this.stateManager.getAllFileMappings();
       const entries = Object.entries(allMappings);
+      const total = entries.length;
 
-      for (const [filePath, mapping] of entries) {
+      for (let i = 0; i < entries.length; i++) {
         if (this.abortRequested) break;
 
+        const [filePath, mapping] = entries[i];
         const file = this.app.vault.getAbstractFileByPath(filePath);
         if (!file || !("extension" in file)) {
           skipped++;
@@ -347,11 +370,11 @@ export class SyncEngine {
         try {
           const result = await this.pullCurrentFile(file as TFile);
           if (result === "pulled") pulled++;
-          else if (result === "conflict") {
-            conflicts++;
-            this.stateManager.addLog("warn", `Pull conflict (local changes): ${filePath}`, filePath);
-          } else {
-            skipped++;
+          else skipped++;
+
+          if ((i + 1) % 5 === 0 || i === entries.length - 1) {
+            const pct = Math.round(((i + 1) / total) * 100);
+            this.reportProgress(`Pulling ${i + 1}/${total}...`, pct);
           }
         } catch (e: any) {
           errors++;
@@ -359,7 +382,7 @@ export class SyncEngine {
         }
       }
 
-      const msg = `Pull complete: ${pulled} updated, ${conflicts} conflicts, ${errors} errors`;
+      const msg = `Pull complete: ${pulled} updated, ${errors} errors`;
       this.stateManager.addLog("info", msg);
       new Notice(msg);
     } catch (e: any) {
@@ -369,7 +392,401 @@ export class SyncEngine {
       this.isSyncing = false;
     }
 
-    return { pulled, conflicts, skipped, errors };
+    return { pulled, skipped, errors };
+  }
+
+  // ── Pull New Pages from Notion ─────────────────────────────
+
+  /**
+   * Recursively traverse Notion pages under rootPageId and create local files
+   * for pages not yet in any file mapping.
+   */
+  async pullNewPages(): Promise<{ created: number; errors: number }> {
+    if (this.isSyncing) {
+      new Notice("Sync already in progress");
+      return { created: 0, errors: 0 };
+    }
+    if (!this.validateSettings()) return { created: 0, errors: 0 };
+
+    this.isSyncing = true;
+    this.abortRequested = false;
+    let created = 0;
+    let errors = 0;
+
+    try {
+      this.stateManager.addLog("info", "Starting pull new pages from Notion");
+      new Notice("Pulling new pages from Notion...");
+
+      // Build set of all already-known Notion page IDs
+      const knownIds = new Set<string>();
+      for (const mapping of Object.values(this.stateManager.getAllFileMappings())) {
+        knownIds.add(normalizeNotionId(mapping.notionPageId));
+      }
+
+      // Traverse recursively
+      const result = await this.traverseAndCreatePages(
+        this.settings.rootPageId,
+        "",
+        knownIds,
+        0,
+        created,
+        errors
+      );
+      created = result.created;
+      errors = result.errors;
+
+      const msg = `Pull new pages complete: ${created} created, ${errors} errors`;
+      this.stateManager.addLog("info", msg);
+      new Notice(msg);
+    } catch (e: any) {
+      this.stateManager.addLog("error", `Pull new pages failed: ${e.message}`);
+      new Notice(`Pull new pages failed: ${e.message}`);
+    } finally {
+      this.isSyncing = false;
+    }
+
+    return { created, errors };
+  }
+
+  /**
+   * Recursively traverse child pages. For each unknown page, create a local file.
+   */
+  private async traverseAndCreatePages(
+    notionPageId: string,
+    parentFolderPath: string,
+    knownIds: Set<string>,
+    depth: number,
+    created: number,
+    errors: number
+  ): Promise<{ created: number; errors: number }> {
+    if (this.abortRequested || depth > 20) return { created, errors };
+
+    let childPages: Array<{id: string, title: string}>;
+    try {
+      childPages = await this.notionClient.getChildPages(notionPageId);
+    } catch (e: any) {
+      this.stateManager.addLog("warn", `Could not fetch children of ${notionPageId}: ${e.message}`);
+      return { created, errors };
+    }
+
+    const folderMappings = this.stateManager.getAllFolderMappings();
+    // Build reverse map: notionPageId -> folderPath
+    const notionIdToFolder: Record<string, string> = {};
+    for (const [folderPath, nId] of Object.entries(folderMappings)) {
+      notionIdToFolder[normalizeNotionId(nId)] = folderPath;
+    }
+
+    // Determine the folder that corresponds to notionPageId
+    let currentFolder = parentFolderPath;
+    if (depth > 0) {
+      const resolvedFolder = notionIdToFolder[normalizeNotionId(notionPageId)];
+      if (resolvedFolder) {
+        currentFolder = resolvedFolder;
+      }
+    }
+
+    const total = childPages.length;
+
+    for (let i = 0; i < childPages.length; i++) {
+      if (this.abortRequested) break;
+
+      const child = childPages[i];
+      const normalizedId = normalizeNotionId(child.id);
+
+      // Report progress
+      if (total > 0) {
+        const pct = Math.round((i / total) * 100);
+        this.reportProgress(`Checking pages... ${child.title}`, pct);
+      }
+
+      // Check if this page has further child pages (to decide folder mapping)
+      let grandChildren: Array<{id: string, title: string}> = [];
+      try {
+        grandChildren = await this.notionClient.getChildPages(child.id);
+      } catch {
+        // ignore
+      }
+
+      const hasChildren = grandChildren.length > 0;
+
+      // If this page has children, register it as a folder mapping too
+      if (hasChildren) {
+        const safeFolderName = this.sanitizeFileName(child.title);
+        const folderPath = currentFolder
+          ? `${currentFolder}/${safeFolderName}`
+          : safeFolderName;
+
+        if (!this.stateManager.getFolderMapping(folderPath)) {
+          this.stateManager.setFolderMapping(folderPath, child.id);
+          // Ensure folder exists in vault
+          try {
+            const existing = this.app.vault.getAbstractFileByPath(folderPath);
+            if (!existing) {
+              await this.app.vault.createFolder(folderPath);
+            }
+          } catch {
+            // folder may already exist
+          }
+        }
+      }
+
+      // Only create a file if this page is NOT already in our mappings
+      if (!knownIds.has(normalizedId)) {
+        try {
+          // Fetch blocks and convert to markdown
+          const blocks = await this.notionClient.getBlocksWithContent(child.id);
+          const rawMarkdown = this.n2md.convert(blocks);
+          let markdown = this.restoreWikiLinks(rawMarkdown);
+
+          // Download images if enabled
+          if (this.settings.downloadImages) {
+            const safeTitle = this.sanitizeFileName(child.title);
+            const tempFilePath = currentFolder
+              ? `${currentFolder}/${safeTitle}.md`
+              : `${safeTitle}.md`;
+            markdown = await this.downloadNotionImages(markdown, tempFilePath);
+          }
+
+          // Determine file path
+          const safeFileName = this.sanitizeFileName(child.title);
+          const baseFolder = currentFolder;
+          const filePath = await this.findUniquePath(
+            baseFolder ? `${baseFolder}/${safeFileName}.md` : `${safeFileName}.md`
+          );
+
+          // Ensure parent folder exists
+          const parts = filePath.split("/");
+          parts.pop();
+          if (parts.length > 0) {
+            const dir = parts.join("/");
+            const existing = this.app.vault.getAbstractFileByPath(dir);
+            if (!existing) {
+              try {
+                await this.app.vault.createFolder(dir);
+              } catch {
+                // may already exist
+              }
+            }
+          }
+
+          await this.app.vault.create(filePath, markdown);
+
+          const hash = this.hashContent(markdown);
+          this.stateManager.setFileMapping(filePath, {
+            notionPageId: child.id,
+            lastSyncedHash: hash,
+            lastSyncedAt: Date.now(),
+          });
+
+          // Add to known IDs so we don't create it again
+          knownIds.add(normalizedId);
+
+          // Add history entry
+          this.stateManager.addHistoryEntry({
+            timestamp: Date.now(),
+            operation: "pull-new",
+            filePath,
+            fileName: safeFileName,
+          });
+
+          this.stateManager.addLog("info", `Created from Notion: ${filePath}`, filePath);
+          created++;
+        } catch (e: any) {
+          errors++;
+          this.stateManager.addLog("error", `Failed to create page ${child.title}: ${e.message}`);
+        }
+      }
+
+      // Recurse into child pages
+      if (hasChildren) {
+        const folderMappingsNow = this.stateManager.getAllFolderMappings();
+        const notionIdToFolderNow: Record<string, string> = {};
+        for (const [fp, nid] of Object.entries(folderMappingsNow)) {
+          notionIdToFolderNow[normalizeNotionId(nid)] = fp;
+        }
+        const childFolder = notionIdToFolderNow[normalizeNotionId(child.id)] || currentFolder;
+
+        const sub = await this.traverseAndCreatePages(
+          child.id,
+          childFolder,
+          knownIds,
+          depth + 1,
+          created,
+          errors
+        );
+        created = sub.created;
+        errors = sub.errors;
+      }
+    }
+
+    return { created, errors };
+  }
+
+  // ── Download Notion Images ─────────────────────────────────
+
+  /**
+   * Find all Notion/S3 image URLs in markdown, download them to the vault,
+   * and replace with Obsidian ![[filename]] embeds.
+   */
+  private async downloadNotionImages(markdown: string, filePath: string): Promise<string> {
+    // Match ![caption](url) where url starts with https:// and contains notion.so or amazonaws.com
+    const imageRegex = /!\[([^\]]*)\]\((https:\/\/[^)]*(?:notion\.so|amazonaws\.com)[^)]*)\)/g;
+
+    const matches: Array<{ full: string; caption: string; url: string }> = [];
+    let m: RegExpExecArray | null;
+    while ((m = imageRegex.exec(markdown)) !== null) {
+      matches.push({ full: m[0], caption: m[1], url: m[2] });
+    }
+
+    if (matches.length === 0) return markdown;
+
+    // Determine attachment folder
+    const fileDir = filePath.includes("/")
+      ? filePath.substring(0, filePath.lastIndexOf("/"))
+      : "";
+    const attachmentFolder = fileDir
+      ? `${fileDir}/_attachments`
+      : "_attachments";
+
+    // Ensure attachment folder exists
+    const existingFolder = this.app.vault.getAbstractFileByPath(attachmentFolder);
+    if (!existingFolder) {
+      try {
+        await this.app.vault.createFolder(attachmentFolder);
+      } catch {
+        // may already exist
+      }
+    }
+
+    let result = markdown;
+
+    for (const { full, caption, url } of matches) {
+      try {
+        // Extract filename from URL
+        let fileName = this.extractFileNameFromUrl(url);
+        if (!fileName) continue;
+
+        // Ensure unique filename in attachment folder
+        fileName = await this.findUniqueAttachmentName(attachmentFolder, fileName);
+        const attachmentPath = `${attachmentFolder}/${fileName}`;
+
+        // Download the image
+        const resp = await requestUrl({ url, method: "GET", throw: false });
+        if (resp.status < 200 || resp.status >= 300) {
+          this.stateManager.addLog("warn", `Failed to download image: ${url} (status ${resp.status})`);
+          continue;
+        }
+
+        // Check if file already exists before creating
+        const existingFile = this.app.vault.getAbstractFileByPath(attachmentPath);
+        if (!existingFile) {
+          await this.app.vault.createBinary(attachmentPath, resp.arrayBuffer);
+        }
+
+        // Replace URL with Obsidian embed
+        result = result.replace(full, `![[${fileName}]]`);
+      } catch (e: any) {
+        this.stateManager.addLog("warn", `Image download failed: ${e.message}`);
+      }
+    }
+
+    return result;
+  }
+
+  /** Extract a sanitized filename from a URL */
+  private extractFileNameFromUrl(url: string): string {
+    try {
+      const parsed = new URL(url);
+      const pathParts = parsed.pathname.split("/");
+      let name = pathParts[pathParts.length - 1] || "image";
+      // Remove query params from name
+      name = name.split("?")[0];
+      // Sanitize
+      name = name.replace(/[^\w.\-]/g, "_");
+      // Ensure it has an extension
+      if (!name.includes(".")) {
+        name += ".png";
+      }
+      // Truncate if too long
+      if (name.length > 64) {
+        const ext = name.substring(name.lastIndexOf("."));
+        name = name.substring(0, 60 - ext.length) + ext;
+      }
+      return name;
+    } catch {
+      return "image.png";
+    }
+  }
+
+  /** Ensure a unique filename in the attachment folder */
+  private async findUniqueAttachmentName(folder: string, fileName: string): Promise<string> {
+    const ext = fileName.includes(".") ? fileName.substring(fileName.lastIndexOf(".")) : "";
+    const base = fileName.includes(".") ? fileName.substring(0, fileName.lastIndexOf(".")) : fileName;
+
+    let candidate = fileName;
+    let n = 1;
+    while (this.app.vault.getAbstractFileByPath(`${folder}/${candidate}`)) {
+      candidate = `${base} (${n})${ext}`;
+      n++;
+    }
+    return candidate;
+  }
+
+  /** Find a unique file path by appending (1), (2) etc. */
+  private async findUniquePath(filePath: string): Promise<string> {
+    const ext = filePath.includes(".") ? filePath.substring(filePath.lastIndexOf(".")) : "";
+    const base = filePath.includes(".") ? filePath.substring(0, filePath.lastIndexOf(".")) : filePath;
+
+    let candidate = filePath;
+    let n = 1;
+    while (this.app.vault.getAbstractFileByPath(candidate)) {
+      candidate = `${base} (${n})${ext}`;
+      n++;
+    }
+    return candidate;
+  }
+
+  /** Sanitize a title to use as a filename */
+  private sanitizeFileName(name: string): string {
+    return name
+      .replace(/[\\/:*?"<>|#^[\]]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .substring(0, 100)
+      || "Untitled";
+  }
+
+  // ── Wiki-link Restoration ──────────────────────────────────
+
+  /**
+   * After pulling from Notion, replace Notion page URLs with Obsidian [[wiki-links]].
+   *
+   * Notion stores internal links as:
+   *   [Page Title](https://www.notion.so/Title-339ee678f579814aa880dad31be33d8e)
+   * or just:
+   *   [Page Title](https://www.notion.so/339ee678f579814aa880dad31be33d8e)
+   *
+   * We look up the page ID in our stateManager reverse map and convert back to [[filename]].
+   */
+  restoreWikiLinks(markdown: string): string {
+    // Match [any text](https://www.notion.so/...ID) where ID is 32 hex chars at the end
+    return markdown.replace(
+      /\[([^\]]*)\]\(https:\/\/(?:www\.)?notion\.so\/[^\s)]*?([0-9a-f]{32})\)/gi,
+      (_match, linkText, rawId) => {
+        const filePath = this.stateManager.getFilePathByNotionId(rawId);
+        if (!filePath) return _match; // not in our vault — keep as-is
+
+        // Use just the filename without extension as the wiki-link target
+        const fileName = filePath.split("/").pop()?.replace(/\.md$/, "") || linkText;
+
+        // If the display text differs from the file name, add an alias: [[target|alias]]
+        const cleanText = linkText.replace(/^[^\w]*/, "").trim(); // strip leading emoji/spaces
+        if (cleanText && cleanText !== fileName) {
+          return `[[${fileName}|${cleanText}]]`;
+        }
+        return `[[${fileName}]]`;
+      }
+    );
   }
 
   // ── Internal Methods ───────────────────────────────────────
@@ -427,6 +844,14 @@ export class SyncEngine {
           lastSyncedAt: Date.now(),
         });
 
+        // Add history entry for push
+        this.stateManager.addHistoryEntry({
+          timestamp: Date.now(),
+          operation: "push",
+          filePath: file.path,
+          fileName: file.basename,
+        });
+
         this.stateManager.addLog("info", `Updated: ${file.path}`, file.path);
         return true;
       } catch (error: any) {
@@ -455,6 +880,14 @@ export class SyncEngine {
       notionPageId: pageId,
       lastSyncedHash: hash,
       lastSyncedAt: Date.now(),
+    });
+
+    // Add history entry for push (new page created)
+    this.stateManager.addHistoryEntry({
+      timestamp: Date.now(),
+      operation: "push",
+      filePath: file.path,
+      fileName: file.basename,
     });
 
     this.stateManager.addLog("info", `Created: ${file.path}`, file.path);
@@ -575,8 +1008,6 @@ export class SyncEngine {
 
   /**
    * Extract frontmatter and sync as Notion page properties.
-   * Notion pages that aren't in a database have limited property support,
-   * so we add metadata as a properties block at the top of the page.
    */
   private async syncMetadata(
     pageId: string,
@@ -585,9 +1016,6 @@ export class SyncEngine {
     const frontmatter = MarkdownParser.extractFrontmatter(content);
     if (Object.keys(frontmatter).length === 0) return;
 
-    // Since standalone Notion pages don't support custom properties,
-    // we represent metadata as a formatted callout block at the top.
-    // For database-backed pages, you'd use properties directly.
     const metaLines = Object.entries(frontmatter).map(([key, value]) => {
       const displayValue = Array.isArray(value) ? value.join(", ") : String(value);
       return `${key}: ${displayValue}`;
@@ -606,10 +1034,7 @@ export class SyncEngine {
         color: "blue_background",
       },
     };
-
-    // Prepend metadata block (append at the beginning via the API)
-    // Since we can't prepend easily, this gets included in the page creation.
-    // For updates, metadata is part of the full content re-sync.
+    // metadata included during page creation/full re-sync
   }
 
   /**

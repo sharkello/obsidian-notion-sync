@@ -4,17 +4,13 @@ import type {
   SyncState,
   SyncMapping,
   SyncLogEntry,
-  DEFAULT_SETTINGS,
+  SyncHistoryEntry,
+  SyncHistory,
 } from "./types";
 import {
   DEFAULT_SYNC_STATE,
+  DEFAULT_SYNC_HISTORY,
 } from "./types";
-
-/** Persisted data structure: settings + sync state */
-interface PersistedData {
-  settings: PluginSettings;
-  syncState: SyncState;
-}
 
 /**
  * Manages persistent plugin state: file/folder mappings, sync timestamps,
@@ -26,6 +22,7 @@ export class StateManager {
   private log: SyncLogEntry[] = [];
   private maxLogEntries = 500;
   private dirty = false;
+  private history: SyncHistory = { ...DEFAULT_SYNC_HISTORY, entries: [] };
 
   constructor(plugin: Plugin, initialState?: SyncState) {
     this.plugin = plugin;
@@ -59,6 +56,20 @@ export class StateManager {
   /** Get all file mappings */
   getAllFileMappings(): Record<string, SyncMapping> {
     return { ...this.state.fileMappings };
+  }
+
+  /**
+   * Reverse lookup: find the Obsidian file path for a given Notion page ID.
+   * Used during pull to restore [[wiki-links]] from Notion URLs.
+   */
+  getFilePathByNotionId(notionPageId: string): string | undefined {
+    const normalized = normalizeNotionId(notionPageId);
+    for (const [filePath, mapping] of Object.entries(this.state.fileMappings)) {
+      if (normalizeNotionId(mapping.notionPageId) === normalized) {
+        return filePath;
+      }
+    }
+    return undefined;
   }
 
   // ── Folder Mappings ────────────────────────────────────────
@@ -133,6 +144,38 @@ export class StateManager {
     this.log = [];
   }
 
+  // ── Sync History ───────────────────────────────────────────
+
+  /** Add a history entry; auto-generates id, caps at 100 entries */
+  addHistoryEntry(entry: Omit<SyncHistoryEntry, 'id'>): void {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    this.history.entries.unshift({ id, ...entry });
+    if (this.history.entries.length > 100) {
+      this.history.entries = this.history.entries.slice(0, 100);
+    }
+    this.dirty = true;
+  }
+
+  /** Get all history entries */
+  getHistory(): SyncHistoryEntry[] {
+    return [...this.history.entries];
+  }
+
+  /** Get a specific history entry by id */
+  getHistoryEntry(id: string): SyncHistoryEntry | undefined {
+    return this.history.entries.find(e => e.id === id);
+  }
+
+  /** Get the history object for persistence */
+  getHistoryForPersistence(): SyncHistory {
+    return { entries: [...this.history.entries] };
+  }
+
+  /** Load history from persisted data */
+  setHistory(history: SyncHistory): void {
+    this.history = history;
+  }
+
   // ── Persistence ────────────────────────────────────────────
 
   /** Get the current sync state for saving */
@@ -187,4 +230,12 @@ export class StateManager {
     this.state = { ...DEFAULT_SYNC_STATE };
     this.dirty = true;
   }
+}
+
+/**
+ * Strip dashes from a Notion page ID so IDs from URLs and API can be compared.
+ * e.g. "339ee678-f579-814a-a880-dad31be33d8e" → "339ee678f579814aa880dad31be33d8e"
+ */
+export function normalizeNotionId(id: string): string {
+  return id.replace(/-/g, "").toLowerCase();
 }

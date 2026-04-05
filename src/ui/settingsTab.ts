@@ -165,6 +165,21 @@ export class NotionSyncSettingTab extends PluginSettingTab {
           })
       );
 
+    new Setting(containerEl)
+      .setName("Download Images on Pull")
+      .setDesc(
+        "When pulling from Notion, download images to a local _attachments folder " +
+        "and replace URLs with Obsidian ![[filename]] embeds."
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.downloadImages)
+          .onChange(async (value) => {
+            this.plugin.settings.downloadImages = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
     // ── Status ────────────────────────────────────────────────
 
     containerEl.createEl("h3", { text: "Status" });
