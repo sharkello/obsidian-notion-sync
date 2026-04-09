@@ -1,7 +1,7 @@
 {
   "id": "notion-sync",
   "name": "Notion Sync",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "minAppVersion": "1.4.0",
   "description": "Sync your vault with Notion — preserves folder hierarchy, markdown formatting, internal links, metadata, and attachments.",
   "author": "Sharky",
