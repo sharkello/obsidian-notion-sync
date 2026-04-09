@@ -97,7 +97,7 @@ export class MarkdownParser {
     if (headingMatch) {
       const level = headingMatch[1].length as 1 | 2 | 3;
       const text = headingMatch[2];
-      const type = `heading_${level}` as "heading_1" | "heading_2" | "heading_3";
+      const type = `heading_${level}`;
       return {
         block: {
           type,

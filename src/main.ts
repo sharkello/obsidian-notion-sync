@@ -56,7 +56,7 @@ export default class NotionSyncPlugin extends Plugin {
     );
 
     // Ribbon icon — opens the sync panel
-    this.addRibbonIcon("upload-cloud", "Notion Sync", () => {
+    this.addRibbonIcon("upload-cloud", "Notion sync", () => {
       void this.activateSyncPanel();
     });
 
@@ -171,7 +171,7 @@ export default class NotionSyncPlugin extends Plugin {
 
   // ── Status Bar ─────────────────────────────────────────────
 
-  updateStatusBar(state: "idle" | "syncing" | "error", detail?: string): void {
+  updateStatusBar(state: "idle" | "syncing" | "error", _detail?: string): void {
     if (!this.statusBarEl) return;
 
     this.statusBarEl.removeClass("notion-sync-status-error");
@@ -183,15 +183,15 @@ export default class NotionSyncPlugin extends Plugin {
           const agoStr = this.formatTimeAgo(lastSync);
           this.statusBarEl.setText(`☁ Synced ${agoStr}`);
         } else {
-          this.statusBarEl.setText("☁ Ready");
+          this.statusBarEl.setText("☁ ready");
         }
         break;
       }
       case "syncing":
-        this.statusBarEl.setText("⟳ Syncing...");
+        this.statusBarEl.setText("⟳ syncing...");
         break;
       case "error":
-        this.statusBarEl.setText("⚠ Sync error");
+        this.statusBarEl.setText("⚠ sync error");
         this.statusBarEl.addClass("notion-sync-status-error");
         break;
     }
@@ -266,7 +266,7 @@ export default class NotionSyncPlugin extends Plugin {
 
       case SyncMode.Scheduled:
         this.scheduledInterval = window.setInterval(
-          () => this.syncIncremental(),
+          () => { void this.syncIncremental(); },
           this.settings.scheduledIntervalMinutes * 60 * 1000
         );
         this.registerInterval(this.scheduledInterval);
@@ -442,13 +442,13 @@ export default class NotionSyncPlugin extends Plugin {
     const { workspace } = this.app;
     const existing = workspace.getLeavesOfType(SYNC_PANEL_VIEW_TYPE);
     if (existing.length > 0) {
-      workspace.revealLeaf(existing[0]);
+      void workspace.revealLeaf(existing[0]);
       return;
     }
     const leaf = workspace.getRightLeaf(false);
     if (leaf) {
       await leaf.setViewState({ type: SYNC_PANEL_VIEW_TYPE, active: true });
-      workspace.revealLeaf(leaf);
+      void workspace.revealLeaf(leaf);
     }
   }
 
@@ -476,7 +476,7 @@ export default class NotionSyncPlugin extends Plugin {
   // ── Private ────────────────────────────────────────────────
 
   private async loadState(): Promise<void> {
-    const data: PersistedData | null = await this.loadData();
+    const data = await this.loadData() as PersistedData | null;
     if (data) {
       this.settings = { ...DEFAULT_SETTINGS, ...data.settings };
       this.stateManager.setState({

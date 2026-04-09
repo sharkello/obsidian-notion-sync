@@ -17,7 +17,7 @@ export class NotionSyncSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    new Setting(containerEl).setName("Notion sync settings").setHeading();
+    ;
 
     // ── Connection ────────────────────────────────────────────
 
@@ -31,7 +31,7 @@ export class NotionSyncSettingTab extends PluginSettingTab {
       )
       .addText((text) =>
         text
-          .setPlaceholder("secret_...")
+          .setPlaceholder("Secret_...")
           .setValue(this.plugin.settings.notionToken)
           .onChange(async (value) => {
             this.plugin.settings.notionToken = value;
@@ -47,7 +47,7 @@ export class NotionSyncSettingTab extends PluginSettingTab {
       )
       .addText((text) =>
         text
-          .setPlaceholder("abc123...")
+          .setPlaceholder("Abc123...")
           .setValue(this.plugin.settings.rootPageId)
           .onChange(async (value) => {
             this.plugin.settings.rootPageId = value.trim();

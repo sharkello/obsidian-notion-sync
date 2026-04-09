@@ -54,7 +54,7 @@ export class AttachmentUploader {
       if (
         calloutData?.rich_text?.[0]?.text?.content?.startsWith("Embedded file: ")
       ) {
-        const filename = (calloutData.rich_text![0].text as { content: string }).content.replace(
+        const filename = (calloutData.rich_text)[0].text?.content.replace(
           "Embedded file: ",
           ""
         );

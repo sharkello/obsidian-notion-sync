@@ -69,18 +69,20 @@ export class HistoryModal extends Modal {
     // Rollback button (only for pull entries that have a snapshot)
     if (entry.operation === "pull" && entry.snapshot) {
       const rollbackBtn = row.createEl("button", {
-        text: "↩ Rollback",
+        text: "↩ rollback",
         cls: "notion-sync-history-rollback-btn",
       });
-      rollbackBtn.addEventListener("click", async () => {
-        rollbackBtn.setAttr("disabled", "true");
-        rollbackBtn.setText("Rolling back...");
-        try {
-          await this.plugin.rollbackFile(entry.id);
-          rollbackBtn.setText("Done");
-        } catch {
-          rollbackBtn.setText("Failed");
-        }
+      rollbackBtn.addEventListener("click", () => {
+        void (async () => {
+          rollbackBtn.setAttr("disabled", "true");
+          rollbackBtn.setText("Rolling back...");
+          try {
+            await this.plugin.rollbackFile(entry.id);
+            rollbackBtn.setText("Done");
+          } catch {
+            rollbackBtn.setText("Failed");
+          }
+        })();
       });
     }
   }

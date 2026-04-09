@@ -22,7 +22,7 @@ export class RateLimiter {
   async schedule<T>(fn: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       this.queue.push({ fn, resolve, reject });
-      this.processQueue();
+      void this.processQueue();
     });
   }
 
@@ -51,7 +51,7 @@ export class RateLimiter {
       item.reject(error);
     } finally {
       this.running--;
-      this.processQueue();
+      void this.processQueue();
     }
   }
 

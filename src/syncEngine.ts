@@ -7,7 +7,11 @@ import { NotionToMarkdown } from "./notionToMarkdown";
 import { LinkResolver } from "./linkResolver";
 import { AttachmentUploader } from "./attachmentUploader";
 import { StateManager, normalizeNotionId } from "./stateManager";
-import type { PluginSettings, NotionBlock } from "./types";
+import type { PluginSettings } from "./types";
+
+function errMsg(e: unknown): string {
+  return e instanceof Error ? errMsg(e) : String(e);
+}
 
 /**
  * Orchestrates synchronization between the Obsidian vault and Notion.
@@ -126,7 +130,7 @@ export class SyncEngine {
           errors++;
           this.stateManager.addLog(
             "error",
-            `Failed to sync: ${error.message}`,
+            `Failed to sync: ${errMsg(error)}`,
             file.path
           );
         }
@@ -142,8 +146,8 @@ export class SyncEngine {
       );
       new Notice(`Sync complete: ${synced} files synced, ${errors} errors`);
     } catch (error) {
-      this.stateManager.addLog("error", `Full sync failed: ${error.message}`);
-      new Notice(`Sync failed: ${error.message}`);
+      this.stateManager.addLog("error", `Full sync failed: ${errMsg(error)}`);
+      new Notice(`Sync failed: ${errMsg(error)}`);
     } finally {
       this.isSyncing = false;
     }
@@ -193,7 +197,7 @@ export class SyncEngine {
           errors++;
           this.stateManager.addLog(
             "error",
-            `Incremental sync failed: ${error.message}`,
+            `Incremental sync failed: ${errMsg(error)}`,
             file.path
           );
         }
@@ -212,8 +216,8 @@ export class SyncEngine {
       );
       new Notice(`Incremental sync: ${synced} updated, ${errors} errors`);
     } catch (error) {
-      this.stateManager.addLog("error", `Incremental sync failed: ${error.message}`);
-      new Notice(`Sync failed: ${error.message}`);
+      this.stateManager.addLog("error", `Incremental sync failed: ${errMsg(error)}`);
+      new Notice(`Sync failed: ${errMsg(error)}`);
     } finally {
       this.isSyncing = false;
     }
@@ -247,10 +251,10 @@ export class SyncEngine {
     } catch (error) {
       this.stateManager.addLog(
         "error",
-        `Failed to sync: ${error.message}`,
+        `Failed to sync: ${errMsg(error)}`,
         file.path
       );
-      new Notice(`Sync failed: ${error.message}`);
+      new Notice(`Sync failed: ${errMsg(error)}`);
       return false;
     } finally {
       this.isSyncing = false;
@@ -379,7 +383,7 @@ export class SyncEngine {
           }
         } catch (e) {
           errors++;
-          this.stateManager.addLog("error", `Pull failed: ${e.message}`, filePath);
+          this.stateManager.addLog("error", `Pull failed: ${errMsg(e)}`, filePath);
         }
       }
 
@@ -387,8 +391,8 @@ export class SyncEngine {
       this.stateManager.addLog("info", msg);
       new Notice(msg);
     } catch (e) {
-      this.stateManager.addLog("error", `Pull failed: ${e.message}`);
-      new Notice(`Pull failed: ${e.message}`);
+      this.stateManager.addLog("error", `Pull failed: ${errMsg(e)}`);
+      new Notice(`Pull failed: ${errMsg(e)}`);
     } finally {
       this.isSyncing = false;
     }
@@ -440,8 +444,8 @@ export class SyncEngine {
       this.stateManager.addLog("info", msg);
       new Notice(msg);
     } catch (e) {
-      this.stateManager.addLog("error", `Pull new pages failed: ${e.message}`);
-      new Notice(`Pull new pages failed: ${e.message}`);
+      this.stateManager.addLog("error", `Pull new pages failed: ${errMsg(e)}`);
+      new Notice(`Pull new pages failed: ${errMsg(e)}`);
     } finally {
       this.isSyncing = false;
     }
@@ -466,7 +470,7 @@ export class SyncEngine {
     try {
       childPages = await this.notionClient.getChildPages(notionPageId);
     } catch (e) {
-      this.stateManager.addLog("warn", `Could not fetch children of ${notionPageId}: ${e.message}`);
+      this.stateManager.addLog("warn", `Could not fetch children of ${notionPageId}: ${errMsg(e)}`);
       return { created, errors };
     }
 
@@ -594,7 +598,7 @@ export class SyncEngine {
           created++;
         } catch (e) {
           errors++;
-          this.stateManager.addLog("error", `Failed to create page ${child.title}: ${e.message}`);
+          this.stateManager.addLog("error", `Failed to create page ${child.title}: ${errMsg(e)}`);
         }
       }
 
@@ -687,7 +691,7 @@ export class SyncEngine {
         // Replace URL with Obsidian embed
         result = result.replace(full, `![[${fileName}]]`);
       } catch (e) {
-        this.stateManager.addLog("warn", `Image download failed: ${e.message}`);
+        this.stateManager.addLog("warn", `Image download failed: ${errMsg(e)}`);
       }
     }
 
@@ -773,7 +777,7 @@ export class SyncEngine {
     // Match [any text](https://www.notion.so/...ID) where ID is 32 hex chars at the end
     return markdown.replace(
       /\[([^\]]*)\]\(https:\/\/(?:www\.)?notion\.so\/[^\s)]*?([0-9a-f]{32})\)/gi,
-      (_match, linkText, rawId) => {
+      (_match: string, linkText: string, rawId: string) => {
         const filePath = this.stateManager.getFilePathByNotionId(rawId);
         if (!filePath) return _match; // not in our vault — keep as-is
 
@@ -857,7 +861,7 @@ export class SyncEngine {
         return true;
       } catch (error) {
         // If page was deleted in Notion, create a new one
-        if (error?.status === 404) {
+        if ((error as { status?: number })?.status === 404) {
           this.stateManager.removeFileMapping(file.path);
         } else {
           throw error;
@@ -937,7 +941,7 @@ export class SyncEngine {
           } catch (error) {
             this.stateManager.addLog(
               "error",
-              `Failed to create folder: ${error.message}`,
+              `Failed to create folder: ${errMsg(error)}`,
               subFolder.path
             );
             continue;
@@ -1051,7 +1055,7 @@ export class SyncEngine {
       } catch (error) {
         this.stateManager.addLog(
           "warn",
-          `Link resolution failed: ${error.message}`,
+          `Link resolution failed: ${errMsg(error)}`,
           file.path
         );
       }

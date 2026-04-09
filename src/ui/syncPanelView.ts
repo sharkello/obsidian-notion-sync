@@ -26,24 +26,26 @@ export class SyncPanelView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "Notion Sync";
+    return "Notion sync";
   }
 
   getIcon(): string {
     return "upload-cloud";
   }
 
-  async onOpen(): Promise<void> {
+  onOpen(): Promise<void> {
     this.render();
     // Refresh status every 30s
     this.refreshInterval = window.setInterval(() => this.refreshStatus(), 30_000);
+    return Promise.resolve();
   }
 
-  async onClose(): Promise<void> {
+  onClose(): Promise<void> {
     if (this.refreshInterval !== null) {
       window.clearInterval(this.refreshInterval);
       this.refreshInterval = null;
     }
+    return Promise.resolve();
   }
 
   /** Full re-render (called on open or mode change) */
@@ -57,30 +59,30 @@ export class SyncPanelView extends ItemView {
 
     // Push group
     const pushGroup = toolbar.createDiv({ cls: "notion-sync-toolbar-group" });
-    this.addToolbarBtn(pushGroup, "upload-cloud", "Push: Sync entire vault to Notion", () =>
-      this.runAction(() => this.plugin.syncFullVaultPublic())
-    );
-    this.addToolbarBtn(pushGroup, "refresh-cw", "Push: Sync changed files to Notion", () =>
-      this.runAction(() => this.plugin.syncIncrementalPublic())
-    );
-    this.addToolbarBtn(pushGroup, "file-up", "Push: Sync current note to Notion", () =>
-      this.runAction(() => this.plugin.syncCurrentFilePublic())
-    );
+    this.addToolbarBtn(pushGroup, "upload-cloud", "Push: Sync entire vault to Notion", () => {
+      void this.runAction(() => this.plugin.syncFullVaultPublic());
+    });
+    this.addToolbarBtn(pushGroup, "refresh-cw", "Push: Sync changed files to Notion", () => {
+      void this.runAction(() => this.plugin.syncIncrementalPublic());
+    });
+    this.addToolbarBtn(pushGroup, "file-up", "Push: Sync current note to Notion", () => {
+      void this.runAction(() => this.plugin.syncCurrentFilePublic());
+    });
 
     // Divider
     toolbar.createDiv({ cls: "notion-sync-toolbar-divider" });
 
     // Pull group
     const pullGroup = toolbar.createDiv({ cls: "notion-sync-toolbar-group" });
-    this.addToolbarBtn(pullGroup, "download-cloud", "Pull: All notes from Notion", () =>
-      this.runAction(() => this.plugin.pullAllPublic())
-    );
-    this.addToolbarBtn(pullGroup, "file-down", "Pull: Current note from Notion", () =>
-      this.runAction(() => this.plugin.pullCurrentFilePublic())
-    );
-    this.addToolbarBtn(pullGroup, "folder-down", "Pull new pages from Notion", () =>
-      this.runAction(() => this.plugin.pullNewPagesPublic())
-    );
+    this.addToolbarBtn(pullGroup, "download-cloud", "Pull: All notes from Notion", () => {
+      void this.runAction(() => this.plugin.pullAllPublic());
+    });
+    this.addToolbarBtn(pullGroup, "file-down", "Pull: Current note from Notion", () => {
+      void this.runAction(() => this.plugin.pullCurrentFilePublic());
+    });
+    this.addToolbarBtn(pullGroup, "folder-down", "Pull new pages from Notion", () => {
+      void this.runAction(() => this.plugin.pullNewPagesPublic());
+    });
 
     // Divider
     toolbar.createDiv({ cls: "notion-sync-toolbar-divider" });
